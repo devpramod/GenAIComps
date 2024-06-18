@@ -93,7 +93,7 @@ class ServiceOrchestrator(DAG):
 
             return StreamingResponse(generate(), media_type="text/event-stream"), cur_node
         else:
-            async with session.post(endpoint, json=inputs) as response:
+            async with session.post(endpoint, json=inputs, timeout=1000) as response:
                 print(response.status)
                 return await response.json(), cur_node
 
