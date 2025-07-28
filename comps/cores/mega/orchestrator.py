@@ -28,83 +28,6 @@ LOGFLAG = os.getenv("LOGFLAG", False)
 ENABLE_OPEA_TELEMETRY = bool(os.environ.get("TELEMETRY_ENDPOINT"))
 
 
-class ConversationMetrics:
-    """Track metrics for conversation turns."""
-    
-    def __init__(self):
-        self.start_time = None
-        self.first_token_time = None
-        self.ttft = None
-        self.full_response = ""
-        
-    def start_request(self):
-        """Mark the start of a request."""
-        self.start_time = time.time()
-        self.first_token_time = None
-        self.ttft = None
-        self.full_response = ""
-        
-    def first_token_received(self):
-        """Mark when the first token is received."""
-        if self.first_token_time is None:
-            self.first_token_time = time.time()
-            self.ttft = round((self.first_token_time - self.start_time) * 1000, 2)
-            
-    def add_content(self, content):
-        """Add content to the full response."""
-        self.full_response += content
-        
-    def count_tokens(self, text):
-        """Placeholder function to count tokens."""
-        if not text:
-            return 0
-        
-        # Handle different input types
-        if isinstance(text, list):
-            # Convert list (like messages array) to string for counting
-            text_str = str(text)
-        elif isinstance(text, dict):
-            # Convert dict to string for counting  
-            text_str = str(text)
-        else:
-            # Already a string
-            text_str = str(text)
-            
-        return int(len(text_str) / 4)
-        
-    def calculate_metrics(self, input_text=None):
-        """Calculate final metrics."""
-        
-        if not self.start_time or not self.first_token_time:
-            return {}
-            
-        end_time = time.time()
-        
-        # Token counts
-        input_token = self.count_tokens(input_text) if input_text else 0
-        output_token = self.count_tokens(self.full_response)
-        total_tokens = input_token + output_token
-        
-        
-        # Calculate TPOT (Time Per Output Token)
-        tpot = round(((end_time - self.first_token_time) / (output_token - 1)) * 1000, 2) if output_token > 1 else 0
-        
-        # Calculate throughput (tokens per second)
-        total_time = end_time - self.start_time
-        throughput = round(output_token / total_time, 2) if total_time > 0 else 0
-        
-        metrics = {
-            "ttft": self.ttft,
-            "tpot": tpot,
-            "throughput": throughput,
-            "total_tokens": total_tokens,
-            "input_token": input_token,
-            "output_token": output_token
-        }
-        
-        return metrics
-
-
 class OrchestratorMetrics:
     def __init__(self) -> None:
         # locking for latency metric creation / method change
@@ -175,6 +98,76 @@ class OrchestratorMetrics:
 
 # Prometheus metrics need to be singletons, not per Orchestrator
 _metrics = OrchestratorMetrics()
+
+
+class ConversationMetrics:
+    """Track metrics for conversation turns."""
+    
+    def __init__(self):
+        self.start_time = None
+        self.first_token_time = None
+        self.ttft = None
+        self.full_response = ""
+        
+    def start_request(self):
+        """Mark the start of a request."""
+        self.start_time = time.time()
+        self.first_token_time = None
+        self.ttft = None
+        self.full_response = ""
+        
+    def first_token_received(self):
+        """Mark when the first token is received."""
+        if self.first_token_time is None:
+            self.first_token_time = time.time()
+            self.ttft = round((self.first_token_time - self.start_time) * 1000, 2)
+            
+    def add_content(self, content):
+        """Add content to the full response."""
+        self.full_response += content
+        
+    def count_tokens(self, text):
+        """Placeholder function to count tokens."""
+        if not text:
+            return 0
+        
+        # Handle different input types
+        if isinstance(text, list):
+            text_str = str(text)
+        elif isinstance(text, dict):
+            text_str = str(text)
+        else:
+            text_str = str(text)
+            
+        return int(len(text_str) / 4)
+        
+    def calculate_metrics(self, input_text=None):
+        """Calculate final metrics."""
+        if not self.start_time or not self.first_token_time:
+            return {}
+            
+        end_time = time.time()
+        
+        # Token counts
+        input_token = self.count_tokens(input_text) if input_text else 0
+        output_token = self.count_tokens(self.full_response)
+        total_tokens = input_token + output_token
+        
+        # Calculate TPOT (Time Per Output Token)
+        tpot = round(((end_time - self.first_token_time) / (output_token - 1)) * 1000, 2) if output_token > 1 else 0
+        
+        # Calculate throughput (tokens per second)
+        total_time = end_time - self.start_time
+        throughput = round(output_token / total_time, 2) if total_time > 0 else 0
+        
+        return {
+            "ttft": self.ttft,
+            "tpot": tpot,
+            "throughput": throughput,
+            "total_tokens": total_tokens,
+            "input_token": input_token,
+            "output_token": output_token
+        }
 
 
 class ServiceOrchestrator(DAG):
@@ -423,7 +416,7 @@ class ServiceOrchestrator(DAG):
                                     token_start = time.monotonic()
                                     is_first = False
                             else:
-                                # Track first token timing
+                                # Track first token timing for conversation metrics
                                 if is_first:
                                     self.conversation_metrics.first_token_received()
                                 
@@ -434,17 +427,11 @@ class ServiceOrchestrator(DAG):
                     self.metrics.request_update(req_start)
                     self.metrics.pending_update(False)
 
-            # Pass conversation_history and metrics to the generator if available
-            conversation_history = inputs.get('conversation_history', None)
+            # Pass conversation metrics to align_generator for streaming
             generator_kwargs = {**kwargs}
-            if conversation_history:
-                generator_kwargs['conversation_history'] = conversation_history
-            
-            # Pass metrics instance and input text for token counting
             generator_kwargs['conversation_metrics'] = self.conversation_metrics
-            input_text_for_metrics = inputs.get('messages', '')
-            generator_kwargs['input_text'] = input_text_for_metrics
-                
+            generator_kwargs['input_text'] = inputs.get('messages', '')
+
             return (
                 StreamingResponse(self.align_generator(generate(), **generator_kwargs), media_type="text/event-stream"),
                 cur_node,
@@ -473,7 +460,8 @@ class ServiceOrchestrator(DAG):
                     json=input_data,
                     headers={"Content-type": "application/json", "Authorization": f"Bearer {access_token}"},
                 )
-                
+
+            # Track first token received for non-streaming LLM requests
             if is_llm_vlm:
                 self.conversation_metrics.first_token_received()
 
@@ -484,7 +472,7 @@ class ServiceOrchestrator(DAG):
                 # Parse as JSON
                 data = await response.json()
                 
-                # For LLM responses, track the output content
+                # Add metrics for non-streaming LLM responses
                 if is_llm_vlm and "choices" in data and data["choices"]:
                     response_content = data["choices"][0]["message"]["content"]
                     self.conversation_metrics.add_content(response_content)
